@@ -12,7 +12,8 @@ const emit = defineEmits<{
 }>();
 
 const destDir = ref("");
-const threads = ref(3);
+const fileConcurrency = ref(5);
+const chunkThreads = ref(1);
 const retries = ref(3);
 const mode = ref<RunMode>("both");
 const running = ref(false);
@@ -60,9 +61,11 @@ async function selectDir() {
 let unlistenProgress: (() => void) | null = null;
 let unlistenSpeed: (() => void) | null = null;
 let unlistenDownloadComplete: (() => void) | null = null;
+let unlistenWarning: (() => void) | null = null;
 
 const downloadCompleted = ref(false);
 const unzipProgress = ref({ done: 0, total: 0, percent: 0 });
+const warnings = ref<string[]>([]);
 
 async function startProcess() {
   if (!destDir.value) return;
@@ -70,6 +73,7 @@ async function startProcess() {
   speed.value = 0;
   downloadCompleted.value = false;
   unzipProgress.value = { done: 0, total: 0, percent: 0 };
+  warnings.value = [];
 
   unlistenProgress = await listen<DownloadProgress>("download-progress", (event) => {
     const p = event.payload;
@@ -90,6 +94,10 @@ async function startProcess() {
     speed.value = event.payload;
   });
 
+  unlistenWarning = await listen<string>("download-warning", (event) => {
+    warnings.value.push(event.payload);
+  });
+
   // Listen for download-complete event to fix pending files immediately
   unlistenDownloadComplete = await listen("download-complete", () => {
     downloadCompleted.value = true;
@@ -104,7 +112,8 @@ async function startProcess() {
     await invoke("start_process", {
       tasks: props.files,
       destDir: destDir.value,
-      threads: threads.value,
+      fileConcurrency: fileConcurrency.value,
+      chunkThreads: chunkThreads.value,
       retries: retries.value,
       mode: mode.value,
       headers: props.headers,
@@ -124,9 +133,11 @@ async function startProcess() {
     unlistenProgress?.();
     unlistenSpeed?.();
     unlistenDownloadComplete?.();
+    unlistenWarning?.();
     unlistenProgress = null;
     unlistenSpeed = null;
     unlistenDownloadComplete = null;
+    unlistenWarning = null;
   }
 }
 
@@ -157,7 +168,8 @@ function handleReset() {
           <option value="unzip_only">仅解压</option>
         </select>
       </label>
-      <label class="opt">并发 <input v-model.number="threads" type="number" min="1" max="10" :disabled="running" /></label>
+      <label class="opt">并发 <input v-model.number="fileConcurrency" type="number" min="1" max="20" :disabled="running" /></label>
+      <label class="opt">线程 <input v-model.number="chunkThreads" type="number" min="1" max="32" :disabled="running" /></label>
       <label class="opt">重试 <input v-model.number="retries" type="number" min="0" max="10" :disabled="running" /></label>
     </div>
 
@@ -187,6 +199,10 @@ function handleReset() {
           完成: {{ files.filter(f => f.status === 'completed').length }} | 跳过: {{ files.filter(f => f.status === 'skipped').length }}
         </span>
       </div>
+    </div>
+
+    <div v-if="warnings.length > 0" class="warnings">
+      <div v-for="(w, i) in warnings" :key="i" class="warn-item">⚠ {{ w }}</div>
     </div>
 
     <div v-if="downloadCompleted || unzippingCount > 0" class="progress-area">
@@ -345,4 +361,13 @@ function handleReset() {
 .speed { color: #7c83ff; }
 .fail { color: #ff6b6b; }
 .detail { font-size: 0.68rem; color: #5a5a7a; }
+
+.warnings {
+  margin-top: 4px;
+}
+.warn-item {
+  font-size: 0.68rem;
+  color: #ffa726;
+  padding: 2px 0;
+}
 </style>

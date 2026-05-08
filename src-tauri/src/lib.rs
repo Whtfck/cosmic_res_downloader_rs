@@ -93,7 +93,8 @@ async fn parse_file_list(
 async fn start_process(
     tasks: Vec<FileItem>,
     dest_dir: String,
-    threads: usize,
+    file_concurrency: usize,
+    chunk_threads: usize,
     retries: usize,
     mode: RunMode,
     headers: HashMap<String, String>,
@@ -103,7 +104,7 @@ async fn start_process(
 
     match mode {
         RunMode::DownloadOnly => {
-            downloader::start_download(tasks, dest_dir, threads, retries, headers, app).await?;
+            downloader::start_download(tasks, dest_dir, file_concurrency, chunk_threads, retries, headers, app).await?;
         }
         RunMode::UnzipOnly => {
             unzipper::unzip_all(&dest_dir, &app).await?;
@@ -112,7 +113,8 @@ async fn start_process(
             downloader::start_download(
                 tasks,
                 dest_dir.clone(),
-                threads,
+                file_concurrency,
+                chunk_threads,
                 retries,
                 headers,
                 app.clone(),

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 
 const CHUNK_SIZE: u64 = 64 * 1024;
@@ -61,7 +61,7 @@ async fn clean_tmp_recursive(dir: &Path) {
         if path.is_dir() {
             Box::pin(clean_tmp_recursive(&path)).await;
         } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.contains(".tmp.") {
+            if name.contains(".tmp.") || (name.contains(".part") && name.rsplit_once(".part").map_or(false, |(_, suffix)| suffix.chars().all(|c| c.is_ascii_digit()))) {
                 let _ = fs::remove_file(&path).await;
             }
         }
@@ -88,7 +88,8 @@ fn spawn_speed_emitter(app: AppHandle) -> tokio::task::JoinHandle<()> {
 pub async fn start_download(
     tasks: Vec<FileItem>,
     dest_dir: String,
-    threads: usize,
+    file_concurrency: usize,
+    chunk_threads: usize,
     retries: usize,
     headers: HashMap<String, String>,
     app: AppHandle,
@@ -96,7 +97,7 @@ pub async fn start_download(
     reset_cancel();
     clean_tmp_files(&dest_dir).await;
 
-    let semaphore = Arc::new(Semaphore::new(threads));
+    let semaphore = Arc::new(Semaphore::new(file_concurrency));
     let header_map = build_headers(&headers);
     let client = reqwest::Client::builder()
         .default_headers(header_map)
@@ -139,7 +140,7 @@ pub async fn start_download(
                 emit_progress(&app, &task.filename, &task.local_path, "pending", 0, 0, 0);
                 return;
             }
-            download_with_retry(&client, &task, &dest, retries, &app, idx, total).await;
+            download_with_retry(&client, &task, &dest, retries, chunk_threads, &app, idx, total).await;
             let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
             eprintln!("[{}/{}] {} 处理完成, 释放信号量 (已完成: {}/{})", idx + 1, total, task.filename, count, total);
             drop(permit);
@@ -166,11 +167,180 @@ pub async fn start_download(
     Ok(())
 }
 
+async fn check_range_support(client: &reqwest::Client, url: &str) -> Option<u64> {
+    let resp = client.head(url).send().await.ok()?;
+    let headers = resp.headers();
+    let accept_ranges = headers
+        .get(reqwest::header::ACCEPT_RANGES)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if accept_ranges != "bytes" {
+        return None;
+    }
+    let content_length = headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())?;
+    Some(content_length)
+}
+
+async fn download_file_chunked(
+    client: &reqwest::Client,
+    url: &str,
+    local_path: &Path,
+    task: &FileItem,
+    app: &AppHandle,
+    chunk_threads: usize,
+    total_size: u64,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let chunk_size_per_thread = total_size / chunk_threads as u64;
+    let downloaded_bytes = Arc::new(AtomicU64::new(0));
+
+    let mut handles = Vec::new();
+
+    for i in 0..chunk_threads {
+        let start = i as u64 * chunk_size_per_thread;
+        let end = if i == chunk_threads - 1 {
+            total_size - 1
+        } else {
+            (i as u64 + 1) * chunk_size_per_thread - 1
+        };
+
+        let part_path = local_path.with_extension(format!("part{}", i));
+        let client = client.clone();
+        let url = url.to_string();
+        let downloaded_bytes = downloaded_bytes.clone();
+        let app = app.clone();
+        let filename = task.filename.clone();
+        let task_local_path = task.local_path.clone();
+
+        let handle = tokio::spawn(async move {
+            let resp = client
+                .get(&url)
+                .header("Range", format!("bytes={}-{}", start, end))
+                .send()
+                .await?;
+
+            if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+                let err: Box<dyn std::error::Error + Send + Sync> =
+                    format!("服务器返回 {} 而非 206", resp.status()).into();
+                return Err(err);
+            }
+
+            let mut file = fs::File::create(&part_path).await?;
+            let mut stream = resp.bytes_stream();
+
+            while let Some(chunk_result) = stream.next().await {
+                if is_cancelled() {
+                    drop(file);
+                    let _ = fs::remove_file(&part_path).await;
+                    return Err("cancelled".into());
+                }
+
+                let chunk = chunk_result?;
+                file.write_all(&chunk).await?;
+                let chunk_len = chunk.len() as u64;
+                TOTAL_BYTES.fetch_add(chunk_len, Ordering::Relaxed);
+                let prev = downloaded_bytes.fetch_add(chunk_len, Ordering::Relaxed);
+                let current = prev + chunk_len;
+
+                // Emit progress every CHUNK_SIZE
+                if total_size > 0 && (current / CHUNK_SIZE) > (prev / CHUNK_SIZE) {
+                    let percent = ((current as f64 / total_size as f64) * 100.0) as u32;
+                    emit_progress(
+                        &app,
+                        &filename,
+                        &task_local_path,
+                        "downloading",
+                        percent,
+                        current,
+                        total_size,
+                    );
+                }
+            }
+
+            file.flush().await?;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all chunks to complete
+    let mut first_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
+
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(format!("分片任务panic: {}", e).into());
+                }
+            }
+        }
+    }
+
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+
+    // Merge part files into the final file
+    let tmp_path = get_tmp_path(local_path);
+    let mut out_file = fs::File::create(&tmp_path).await?;
+    let mut buf = vec![0u8; 8192];
+
+    for i in 0..chunk_threads {
+        let part_path = local_path.with_extension(format!("part{}", i));
+        let mut part_file = fs::File::open(&part_path).await?;
+        loop {
+            let n = part_file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            out_file.write_all(&buf[..n]).await?;
+        }
+    }
+
+    out_file.flush().await?;
+    drop(out_file);
+
+    // Remove part files
+    for i in 0..chunk_threads {
+        let part_path = local_path.with_extension(format!("part{}", i));
+        let _ = fs::remove_file(&part_path).await;
+    }
+
+    // Rename tmp to final
+    if local_path.exists() {
+        fs::remove_file(local_path).await?;
+    }
+    fs::rename(&tmp_path, local_path).await?;
+
+    Ok(total_size)
+}
+
+async fn clean_part_files(local_path: &Path) {
+    for i in 0..256 {
+        let part = local_path.with_extension(format!("part{}", i));
+        if part.exists() {
+            let _ = fs::remove_file(&part).await;
+        } else {
+            break;
+        }
+    }
+}
+
 async fn download_with_retry(
     client: &reqwest::Client,
     task: &FileItem,
     dest_dir: &str,
     retries: usize,
+    chunk_threads: usize,
     app: &AppHandle,
     idx: usize,
     total: usize,
@@ -212,6 +382,54 @@ async fn download_with_retry(
         emit_progress(app, &task.filename, &task.local_path, "downloading", 0, 0, 0);
         eprintln!("[{}/{}] {} 开始下载 (尝试{}/{})", idx + 1, total, task.filename, attempt, retries + 1);
 
+        // Try chunked download if chunk_threads > 1
+        if chunk_threads > 1 && !task.url.is_empty() {
+            if let Some(file_size) = check_range_support(client, &task.url).await {
+                if file_size >= 1_048_576 {
+                    // >= 1MB, use chunked download
+                    match download_file_chunked(client, &task.url, &local_path, task, app, chunk_threads, file_size).await {
+                        Ok(total_size) => {
+                            // Chunked download succeeded, verify MD5 in the caller's loop
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(60),
+                                compute_file_md5_streaming(&local_path),
+                            )
+                            .await
+                            {
+                                Ok(Ok(downloaded_md5)) if downloaded_md5 == task.md5 => {
+                                    emit_progress(app, &task.filename, &task.local_path, "completed", 100, total_size, total_size);
+                                    eprintln!("[{}/{}] {} 完成 (分片下载)", idx + 1, total, task.filename);
+                                    return;
+                                }
+                                _ => {
+                                    let _ = fs::remove_file(&local_path).await;
+                                    if attempt > retries {
+                                        emit_progress(app, &task.filename, &task.local_path, "failed", 0, 0, 0);
+                                        eprintln!("[{}/{}] {} 失败 (MD5不匹配)", idx + 1, total, task.filename);
+                                        return;
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Chunked download failed, clean up and fall back to single-thread
+                            eprintln!("分片下载失败，回退到单线程: {}", e);
+                            clean_part_files(&local_path).await;
+                            // Fall through to download_file_streaming below
+                        }
+                    }
+                } else {
+                    eprintln!("[{}/{}] {} 文件过小({} bytes)，跳过分片", idx + 1, total, task.filename, file_size);
+                }
+            } else {
+                // Range not supported, emit warning
+                let _ = app.emit("download-warning", format!("{} 不支持分片下载，已回退为单线程", task.filename));
+                eprintln!("[{}/{}] {} 不支持 Range 请求，使用单线程下载", idx + 1, total, task.filename);
+            }
+        }
+
+        // Fallback or default: single-thread download
         match download_file_streaming(client, &task.url, &local_path, task, app).await {
             Ok(total_size) => {
                 match tokio::time::timeout(
@@ -313,8 +531,6 @@ async fn download_file_streaming(
 }
 
 async fn compute_file_md5_streaming(path: &Path) -> Result<String, std::io::Error> {
-    use tokio::io::AsyncReadExt;
-
     let mut file = fs::File::open(path).await?;
     let mut hasher = Md5::new();
     let mut buf = vec![0u8; 8192];
