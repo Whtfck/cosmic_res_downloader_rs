@@ -15,11 +15,11 @@ jobs:
       matrix:
         include:
           - platform: windows-latest
-            args: ''
+            args: '--no-bundle'
           - platform: macos-latest
             args: '--target universal-apple-darwin'
           - platform: ubuntu-22.04
-            args: ''
+            args: '--no-bundle'
 
     runs-on: ${{ matrix.platform }}
 
