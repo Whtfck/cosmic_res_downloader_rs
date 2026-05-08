@@ -14,9 +14,7 @@ jobs:
           - platform: windows-latest
             args: ''
           - platform: macos-latest
-            args: '--target aarch64-apple-darwin'
-          - platform: macos-latest
-            args: '--target x86_64-apple-darwin'
+            args: '--target universal-apple-darwin'
           - platform: ubuntu-22.04
             args: ''
 
@@ -30,6 +28,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install Rosetta (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: softwareupdate --install-rosetta --agree-to-license
 
       - name: Install dependencies (Ubuntu)
         if: matrix.platform == 'ubuntu-22.04'
