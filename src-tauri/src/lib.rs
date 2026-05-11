@@ -120,11 +120,11 @@ async fn start_process(
                 app.clone(),
             )
             .await?;
-            // Signal that download phase is complete
-            let _ = app.emit("download-complete", ());
             if downloader::is_cancelled() {
                 return Ok(());
             }
+            // Signal that download phase is complete
+            let _ = app.emit("download-complete", ());
             unzipper::unzip_all(&dest_dir, &app).await?;
         }
     }

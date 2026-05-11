@@ -17,6 +17,7 @@ const chunkThreads = ref(1);
 const retries = ref(3);
 const mode = ref<RunMode>("both");
 const running = ref(false);
+const cancelled = ref(false);
 const speed = ref(0);
 
 const completedCount = computed(
@@ -70,6 +71,7 @@ const warnings = ref<string[]>([]);
 async function startProcess() {
   if (!destDir.value) return;
   running.value = true;
+  cancelled.value = false;
   speed.value = 0;
   downloadCompleted.value = false;
   unzipProgress.value = { done: 0, total: 0, percent: 0 };
@@ -119,10 +121,12 @@ async function startProcess() {
       headers: props.headers,
     });
 
-    // Final fix: mark any remaining "pending" files as "completed"
-    for (const f of props.files) {
-      if (f.status === "pending") {
-        emit("update", f.local_path, "completed", 100, 0, 0);
+    // Final fix: mark any remaining "pending" files as "completed" (only if not cancelled)
+    if (!cancelled.value) {
+      for (const f of props.files) {
+        if (f.status === "pending") {
+          emit("update", f.local_path, "completed", 100, 0, 0);
+        }
       }
     }
   } catch (e) {
@@ -142,6 +146,7 @@ async function startProcess() {
 }
 
 async function handleCancel() {
+  cancelled.value = true;
   await invoke("cancel_process");
 }
 
