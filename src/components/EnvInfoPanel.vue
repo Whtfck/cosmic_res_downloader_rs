@@ -18,7 +18,7 @@ defineProps<{ env: EnvInfo }>();
 
 <style scoped>
 .env-info {
-  background: #16213e;
+  background: var(--surface);
   padding: 8px 12px;
   border-radius: 6px;
   font-size: 0.8rem;
@@ -32,7 +32,7 @@ defineProps<{ env: EnvInfo }>();
 }
 
 .row1 b, .row2 b {
-  color: #8892b0;
+  color: var(--text-dim);
   font-weight: 500;
 }
 

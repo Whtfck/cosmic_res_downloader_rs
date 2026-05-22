@@ -78,7 +78,7 @@ pub fn parse_file_list(json: &Value, base_url: &str, filter_pattern: &str) -> Ve
     items
 }
 
-fn should_filter(filename: &str, re: Option<&regex::Regex>) -> bool {
+pub fn should_filter(filename: &str, re: Option<&regex::Regex>) -> bool {
     // Multiple dots (e.g. "file.20240428bk.zip")
     if filename.matches('.').count() > 1 {
         return true;

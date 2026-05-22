@@ -1,16 +1,26 @@
 use crate::models::{DownloadProgress, FileItem};
 use futures_util::StreamExt;
 use md5::{Digest, Md5};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tauri::{AppHandle, Emitter};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 
 const CHUNK_SIZE: u64 = 64 * 1024;
+
+static FORCE_DOWNLOAD: RwLock<Option<HashSet<String>>> = RwLock::new(None);
+
+fn is_force_download(filename: &str) -> bool {
+    FORCE_DOWNLOAD
+        .read()
+        .ok()
+        .and_then(|set| set.as_ref().map(|s| s.contains(filename)))
+        .unwrap_or(false)
+}
 
 fn build_headers(headers: &HashMap<String, String>) -> reqwest::header::HeaderMap {
     let mut map = reqwest::header::HeaderMap::new();
@@ -92,9 +102,14 @@ pub async fn start_download(
     chunk_threads: usize,
     retries: usize,
     headers: HashMap<String, String>,
+    force_set: HashSet<String>,
     app: AppHandle,
 ) -> Result<(), String> {
     reset_cancel();
+    // Set force download set
+    if let Ok(mut f) = FORCE_DOWNLOAD.write() {
+        *f = if force_set.is_empty() { None } else { Some(force_set) };
+    }
     clean_tmp_files(&dest_dir).await;
 
     let semaphore = Arc::new(Semaphore::new(file_concurrency));
@@ -351,8 +366,10 @@ async fn download_with_retry(
         let _ = fs::create_dir_all(parent).await;
     }
 
-    // Check if file already exists with matching MD5
-    if local_path.exists() {
+    let force = is_force_download(&task.filename);
+
+    // Check if file already exists with matching MD5 (skip if force download)
+    if !force && local_path.exists() {
         match tokio::time::timeout(
             std::time::Duration::from_secs(30),
             compute_file_md5_streaming(&local_path),
@@ -369,6 +386,8 @@ async fn download_with_retry(
                 let _ = fs::remove_file(&local_path).await;
             }
         }
+    } else if force && local_path.exists() {
+        let _ = fs::remove_file(&local_path).await;
     }
 
     let mut attempt = 0;
@@ -389,7 +408,12 @@ async fn download_with_retry(
                     // >= 1MB, use chunked download
                     match download_file_chunked(client, &task.url, &local_path, task, app, chunk_threads, file_size).await {
                         Ok(total_size) => {
-                            // Chunked download succeeded, verify MD5 in the caller's loop
+                            if force {
+                                // Force download: skip MD5 verification
+                                emit_progress(app, &task.filename, &task.local_path, "completed", 100, total_size, total_size);
+                                eprintln!("[{}/{}] {} 完成 (分片下载, 强制)", idx + 1, total, task.filename);
+                                return;
+                            }
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(60),
                                 compute_file_md5_streaming(&local_path),
@@ -432,6 +456,12 @@ async fn download_with_retry(
         // Fallback or default: single-thread download
         match download_file_streaming(client, &task.url, &local_path, task, app).await {
             Ok(total_size) => {
+                if force {
+                    // Force download: skip MD5 verification
+                    emit_progress(app, &task.filename, &task.local_path, "completed", 100, total_size, total_size);
+                    eprintln!("[{}/{}] {} 完成 (强制)", idx + 1, total, task.filename);
+                    return;
+                }
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(60),
                     compute_file_md5_streaming(&local_path),

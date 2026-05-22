@@ -1,8 +1,21 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { FileItem } from "../types";
 
-const props = defineProps<{ files: FileItem[] }>();
+const props = defineProps<{
+  files: FileItem[];
+  ignored: string[];
+  forceDownload: string[];
+}>();
+
+const emit = defineEmits<{
+  ignore: [filename: string];
+  force: [filename: string];
+  resetFile: [filename: string];
+}>();
+
+const ignoredSet = computed(() => new Set(props.ignored));
+const forceSet = computed(() => new Set(props.forceDownload));
 
 const grouped = computed(() => {
   const map = new Map<string, FileItem[]>();
@@ -32,19 +45,68 @@ function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
   return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
 }
+
+// Context menu
+const ctxVisible = ref(false);
+const ctxX = ref(0);
+const ctxY = ref(0);
+const ctxFilename = ref("");
+
+function onContextMenu(e: MouseEvent, filename: string) {
+  e.preventDefault();
+  ctxFilename.value = filename;
+  ctxX.value = e.clientX;
+  ctxY.value = e.clientY;
+  ctxVisible.value = true;
+}
+
+function closeCtx() {
+  ctxVisible.value = false;
+}
+
+function ctxIgnore() {
+  emit("ignore", ctxFilename.value);
+  closeCtx();
+}
+
+function ctxForce() {
+  emit("force", ctxFilename.value);
+  closeCtx();
+}
+
+function ctxReset() {
+  emit("resetFile", ctxFilename.value);
+  closeCtx();
+}
+
+function isIgnored(filename: string): boolean {
+  return ignoredSet.value.has(filename);
+}
+
+function isForced(filename: string): boolean {
+  return forceSet.value.has(filename);
+}
 </script>
 
 <template>
-  <div class="file-list">
+  <div class="file-list" @click="closeCtx">
     <div class="header">文件列表 ({{ files.length }})</div>
     <div class="scroll-area">
       <div v-for="[group, items] in grouped" :key="group" class="group">
         <div class="group-header">{{ group }} <span class="count">({{ items.length }})</span></div>
-        <div v-for="item in items" :key="item.filename" class="file-item">
+        <div
+          v-for="item in items"
+          :key="item.filename"
+          class="file-item"
+          :class="{ ignored: isIgnored(item.filename), forced: isForced(item.filename) }"
+          @contextmenu="onContextMenu($event, item.filename)"
+        >
           <span class="status">{{ statusIcon(item.status) }}</span>
           <span class="name-col">
             <span class="filename">{{ item.filename }}</span>
             <span class="md5">{{ item.md5.slice(0, 8) }}</span>
+            <span v-if="isIgnored(item.filename)" class="tag tag-ignore">IGNORE</span>
+            <span v-else-if="isForced(item.filename)" class="tag tag-force">FORCE</span>
           </span>
           <span v-if="item.status === 'downloading'" class="size-info">
             <span class="size">{{ formatSize(item.downloaded_bytes) }}/{{ formatSize(item.total_bytes) }}</span>
@@ -64,13 +126,21 @@ function formatSize(bytes: number): string {
         </div>
       </div>
     </div>
+
+    <Teleport to="body">
+      <div v-if="ctxVisible" class="ctx-menu" :style="{ left: ctxX + 'px', top: ctxY + 'px' }">
+        <div class="ctx-item" @click="ctxIgnore">忽略（跳过下载）</div>
+        <div class="ctx-item" @click="ctxForce">强制下载（忽略MD5）</div>
+        <div class="ctx-item" @click="ctxReset">重置</div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <style scoped>
 .file-list {
   flex: 1;
-  background: #16213e;
+  background: var(--surface);
   border-radius: 8px;
   display: flex;
   flex-direction: column;
@@ -80,10 +150,10 @@ function formatSize(bytes: number): string {
 
 .header {
   padding: 8px 12px;
-  color: #7c83ff;
+  color: var(--accent);
   font-size: 0.85rem;
   font-weight: 600;
-  border-bottom: 1px solid #2a2a4a;
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
@@ -98,14 +168,14 @@ function formatSize(bytes: number): string {
 }
 
 .group-header {
-  color: #e94560;
+  color: var(--accent2);
   font-weight: 600;
   font-size: 0.78rem;
   padding: 4px 12px 2px;
 }
 
 .group-header .count {
-  color: #8892b0;
+  color: var(--text-dim);
   font-weight: 400;
 }
 
@@ -118,7 +188,15 @@ function formatSize(bytes: number): string {
 }
 
 .file-item:hover {
-  background: #0f3460;
+  background: var(--surface-hover);
+}
+
+.file-item.ignored {
+  opacity: 0.4;
+}
+
+.file-item.forced .filename {
+  color: #ffa726;
 }
 
 .status {
@@ -137,23 +215,41 @@ function formatSize(bytes: number): string {
 }
 
 .filename {
-  color: #e0e0e0;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .md5 {
-  color: #8892b0;
+  color: var(--text-dim);
   font-family: monospace;
   font-size: 0.7rem;
   flex-shrink: 0;
 }
 
+.tag {
+  font-size: 0.6rem;
+  font-weight: 600;
+  padding: 0 4px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.tag-ignore {
+  background: #666;
+  color: #ccc;
+}
+
+.tag-force {
+  background: #e65100;
+  color: #fff;
+}
+
 .pct {
   flex-shrink: 0;
   font-size: 0.75rem;
-  color: #7c83ff;
+  color: var(--accent);
   min-width: 32px;
   text-align: right;
 }
@@ -167,7 +263,7 @@ function formatSize(bytes: number): string {
 
 .size {
   font-size: 0.7rem;
-  color: #8892b0;
+  color: var(--text-dim);
   font-family: monospace;
 }
 
@@ -176,4 +272,28 @@ function formatSize(bytes: number): string {
 .pct.done { color: #4caf50; }
 .pct.fail { color: #ff6b6b; }
 .pct.unzip { color: #ffa726; }
+</style>
+
+<style>
+.ctx-menu {
+  position: fixed;
+  background: var(--surface, #16213e);
+  border: 1px solid var(--border, #2a2a4a);
+  border-radius: 6px;
+  padding: 4px 0;
+  z-index: 999;
+  min-width: 180px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+.ctx-item {
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  color: var(--text, #e0e0e0);
+  cursor: pointer;
+}
+
+.ctx-item:hover {
+  background: var(--surface-hover, #0f3460);
+}
 </style>

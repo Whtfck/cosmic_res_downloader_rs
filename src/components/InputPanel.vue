@@ -7,7 +7,7 @@ interface Header {
 }
 
 const emit = defineEmits<{
-  parse: [jsonUrl: string, headers: Record<string, string>, filterPattern: string];
+  parse: [jsonUrl: string, headers: Record<string, string>, filterPattern: string, xmlFilter: boolean];
 }>();
 
 defineProps<{ loading: boolean }>();
@@ -17,6 +17,7 @@ const DEFAULT_FILTER = String.raw`\d+(?:bk|bak)|(?:bk|bak)\d+`;
 const jsonUrl = ref("");
 const showAdvanced = ref(false);
 const filterPattern = ref(DEFAULT_FILTER);
+const enableXmlFilter = ref(true);
 const headers = ref<Header[]>([{ key: "", value: "" }]);
 
 function addHeader() {
@@ -38,7 +39,7 @@ function handleSubmit() {
     const v = h.value.trim();
     if (k && v) headerMap[k] = v;
   }
-  emit("parse", jsonUrl.value.trim(), headerMap, filterPattern.value);
+  emit("parse", jsonUrl.value.trim(), headerMap, filterPattern.value, enableXmlFilter.value);
 }
 </script>
 
@@ -71,6 +72,11 @@ function handleSubmit() {
           />
           <span class="hint">匹配的文件名将被跳过，多后缀文件始终过滤</span>
         </div>
+
+        <label class="xml-filter-opt">
+          <input type="checkbox" v-model="enableXmlFilter" />
+          XML过滤（只下载/解压XML中列出的zip）
+        </label>
 
         <div class="headers-block">
           <label>请求头</label>
@@ -109,21 +115,21 @@ function handleSubmit() {
 input {
   flex: 1;
   padding: 8px 12px;
-  border: 1px solid #2a2a4a;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: #16213e;
-  color: #e0e0e0;
+  background: var(--surface);
+  color: var(--text);
   font-size: 0.9rem;
   outline: none;
 }
 
 input:focus {
-  border-color: #7c83ff;
+  border-color: var(--accent);
 }
 
 button {
   padding: 8px 24px;
-  background: #7c83ff;
+  background: var(--accent);
   color: #fff;
   border: none;
   border-radius: 6px;
@@ -140,14 +146,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .toggle-btn {
   background: transparent;
-  color: #8892b0;
+  color: var(--text-dim);
   padding: 4px 0;
   font-size: 0.78rem;
   border: none;
   cursor: pointer;
 }
 
-.toggle-btn:hover { color: #e0e0e0; }
+.toggle-btn:hover { color: var(--text); }
 
 .advanced-content {
   margin-top: 6px;
@@ -164,7 +170,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .filter-row label, .headers-block label {
   font-size: 0.78rem;
-  color: #8892b0;
+  color: var(--text-dim);
 }
 
 .filter-input {
@@ -175,7 +181,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .hint {
   font-size: 0.7rem;
-  color: #5a5a7a;
+  color: var(--text-muted);
 }
 
 .headers-block {
@@ -205,8 +211,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .remove-btn {
   width: 28px;
   padding: 5px;
-  background: #3d1f1f;
-  color: #ff6b6b;
+  background: var(--error-bg);
+  color: var(--error-text);
   border: none;
   border-radius: 4px;
   font-size: 1rem;
@@ -214,18 +220,32 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   flex-shrink: 0;
 }
 
-.remove-btn:hover { background: #5a2a2a; }
+.remove-btn:hover { opacity: 0.8; }
 
 .add-btn {
   align-self: flex-start;
   padding: 4px 12px;
   background: transparent;
-  color: #7c83ff;
-  border: 1px solid #2a2a4a;
+  color: var(--accent);
+  border: 1px solid var(--border);
   border-radius: 4px;
   font-size: 0.78rem;
   cursor: pointer;
 }
 
-.add-btn:hover { border-color: #7c83ff; }
+.add-btn:hover { border-color: var(--accent); }
+
+.xml-filter-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.xml-filter-opt input {
+  width: auto;
+  flex: none;
+}
 </style>

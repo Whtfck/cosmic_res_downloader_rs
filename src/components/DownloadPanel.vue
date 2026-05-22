@@ -5,7 +5,14 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import type { FileItem, DownloadProgress, RunMode } from "../types";
 
-const props = defineProps<{ files: FileItem[]; headers: Record<string, string> }>();
+const props = defineProps<{
+  files: FileItem[];
+  headers: Record<string, string>;
+  xmlFilter: boolean;
+  filterPattern: string;
+  ignoredFiles: string[];
+  forceDownloadFiles: string[];
+}>();
 const emit = defineEmits<{
   update: [local_path: string, status: string, progress: number, downloaded_bytes: number, total_bytes: number];
   reset: [];
@@ -63,6 +70,7 @@ let unlistenProgress: (() => void) | null = null;
 let unlistenSpeed: (() => void) | null = null;
 let unlistenDownloadComplete: (() => void) | null = null;
 let unlistenWarning: (() => void) | null = null;
+let unlistenUnzipTotal: (() => void) | null = null;
 
 const downloadCompleted = ref(false);
 const unzipProgress = ref({ done: 0, total: 0, percent: 0 });
@@ -82,9 +90,7 @@ async function startProcess() {
     emit("update", p.local_path, p.status, p.progress, p.downloaded_bytes, p.total_bytes);
 
     // Track unzip progress
-    if (p.status === "unzipping") {
-      unzipProgress.value.total = props.files.filter(f => f.filename.endsWith(".zip")).length;
-    } else if (p.status === "unzipped") {
+    if (p.status === "unzipped") {
       unzipProgress.value.done++;
       if (unzipProgress.value.total > 0) {
         unzipProgress.value.percent = Math.round((unzipProgress.value.done / unzipProgress.value.total) * 100);
@@ -98,6 +104,10 @@ async function startProcess() {
 
   unlistenWarning = await listen<string>("download-warning", (event) => {
     warnings.value.push(event.payload);
+  });
+
+  unlistenUnzipTotal = await listen<number>("unzip-total", (event) => {
+    unzipProgress.value.total = event.payload;
   });
 
   // Listen for download-complete event to fix pending files immediately
@@ -119,6 +129,10 @@ async function startProcess() {
       retries: retries.value,
       mode: mode.value,
       headers: props.headers,
+      xmlFilter: props.xmlFilter,
+      filterPattern: props.filterPattern,
+      ignoredFiles: props.ignoredFiles,
+      forceDownloadFiles: props.forceDownloadFiles,
     });
 
     // Final fix: mark any remaining "pending" files as "completed" (only if not cancelled)
@@ -138,10 +152,12 @@ async function startProcess() {
     unlistenSpeed?.();
     unlistenDownloadComplete?.();
     unlistenWarning?.();
+    unlistenUnzipTotal?.();
     unlistenProgress = null;
     unlistenSpeed = null;
     unlistenDownloadComplete = null;
     unlistenWarning = null;
+    unlistenUnzipTotal = null;
   }
 }
 
@@ -226,7 +242,7 @@ function handleReset() {
 <style scoped>
 .download-panel {
   width: 280px;
-  background: #16213e;
+  background: var(--surface);
   padding: 10px 12px;
   border-radius: 8px;
   display: flex;
@@ -244,10 +260,10 @@ function handleReset() {
 .dir-input {
   flex: 1;
   padding: 5px 8px;
-  border: 1px solid #2a2a4a;
+  border: 1px solid var(--border);
   border-radius: 4px;
-  background: #0f3460;
-  color: #e0e0e0;
+  background: var(--input-bg);
+  color: var(--text);
   font-size: 0.8rem;
   outline: none;
   min-width: 0;
@@ -255,7 +271,7 @@ function handleReset() {
 
 .dir-btn {
   padding: 5px 10px;
-  background: #533483;
+  background: var(--btn-purple);
   color: #fff;
   border: none;
   border-radius: 4px;
@@ -270,16 +286,16 @@ function handleReset() {
   display: flex;
   align-items: center;
   gap: 4px;
-  color: #8892b0;
+  color: var(--text-dim);
   font-size: 0.75rem;
 }
 
 .mode-label select, .opt input {
   padding: 2px 4px;
-  border: 1px solid #2a2a4a;
+  border: 1px solid var(--border);
   border-radius: 3px;
-  background: #0f3460;
-  color: #e0e0e0;
+  background: var(--input-bg);
+  color: var(--text);
   font-size: 0.75rem;
 }
 
@@ -293,7 +309,7 @@ function handleReset() {
 
 .start-btn {
   padding: 6px 20px;
-  background: #e94560;
+  background: var(--accent2);
   color: #fff;
   border: none;
   border-radius: 4px;
@@ -320,33 +336,33 @@ function handleReset() {
 .reset-btn {
   padding: 6px 16px;
   background: transparent;
-  color: #8892b0;
-  border: 1px solid #2a2a4a;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
   border-radius: 4px;
   font-size: 0.85rem;
   cursor: pointer;
 }
 
-.reset-btn:hover { border-color: #8892b0; color: #e0e0e0; }
+.reset-btn:hover { border-color: var(--text-dim); color: var(--text); }
 
 .progress-area { margin-top: 2px; }
 
 .section-label {
   font-size: 0.7rem;
-  color: #5a5a7a;
+  color: var(--text-muted);
   margin-bottom: 2px;
 }
 
 .bar-bg {
   height: 6px;
-  background: #0f3460;
+  background: var(--input-bg);
   border-radius: 3px;
   overflow: hidden;
 }
 
 .bar-fill {
   height: 100%;
-  background: linear-gradient(90deg, #7c83ff, #e94560);
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
   border-radius: 3px;
   transition: width 0.3s ease;
 }
@@ -358,14 +374,14 @@ function handleReset() {
 .progress-row {
   margin-top: 3px;
   font-size: 0.72rem;
-  color: #8892b0;
+  color: var(--text-dim);
   display: flex;
   justify-content: space-between;
 }
 
-.speed { color: #7c83ff; }
+.speed { color: var(--accent); }
 .fail { color: #ff6b6b; }
-.detail { font-size: 0.68rem; color: #5a5a7a; }
+.detail { font-size: 0.68rem; color: var(--text-muted); }
 
 .warnings {
   margin-top: 4px;
